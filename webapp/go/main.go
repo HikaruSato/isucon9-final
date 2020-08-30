@@ -260,10 +260,11 @@ func getTimetable(date string, trainClass string, trainName string, station stri
 	strSlices := []string{date, trainClass, trainName, station}
 	strConcat := strings.Join(strSlices, "")
 	if cache, ok := TimetableCacheMap.Load(strConcat); ok {
-		fmt.Println("Hit cache %v", strConcat)
+		//fmt.Println("Hit cache", strConcat)
 		timetable = cache.(TrainTimetable)
 		return timetable, nil
 	}
+	fmt.Println("Not cache!!")
 
 	err = dbx.Get(&timetable, "SELECT * FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?", date, trainClass, trainName, station)
 	TimetableCacheMap.Store(strConcat, timetable)
@@ -1843,23 +1844,28 @@ func makeReservationResponse(reservation Reservation) (ReservationResponse, erro
 
 	reservationResponse := ReservationResponse{}
 
-	var departure, arrival string
-	err := dbx.Get(
-		&departure,
-		"SELECT departure FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?",
-		reservation.Date.Format("2006/01/02"), reservation.TrainClass, reservation.TrainName, reservation.Departure,
-	)
+	// var departure, arrival string
+	// err := dbx.Get(
+	// 	&departure,
+	// 	"SELECT departure FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?",
+	// 	reservation.Date.Format("2006/01/02"), reservation.TrainClass, reservation.TrainName, reservation.Departure,
+	// )
+	departureTimetable, err := getTimetable(reservation.Date.Format("2006/01/02"), reservation.TrainClass, reservation.TrainName, reservation.Departure)
 	if err != nil {
 		return reservationResponse, err
 	}
-	err = dbx.Get(
-		&arrival,
-		"SELECT arrival FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?",
-		reservation.Date.Format("2006/01/02"), reservation.TrainClass, reservation.TrainName, reservation.Arrival,
-	)
+	departure := departureTimetable.Departure
+
+	// err = dbx.Get(
+	// 	&arrival,
+	// 	"SELECT arrival FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?",
+	// 	reservation.Date.Format("2006/01/02"), reservation.TrainClass, reservation.TrainName, reservation.Arrival,
+	// )
+	arrivalTimetable, err := getTimetable(reservation.Date.Format("2006/01/02"), reservation.TrainClass, reservation.TrainName, reservation.Arrival)
 	if err != nil {
 		return reservationResponse, err
 	}
+	arrival := arrivalTimetable.Arrival
 
 	reservationResponse.ReservationId = reservation.ReservationId
 	reservationResponse.Date = reservation.Date.Format("2006/01/02")
@@ -2141,6 +2147,30 @@ func dummyHandler(w http.ResponseWriter, r *http.Request) {
 	messageResponse(w, "ok")
 }
 
+var wait = new(sync.WaitGroup) // 追加
+func sub(timetables []TrainTimetable, start int, end int) {
+	// sleep := time.Duration(no)
+	// printLog(fmt.Sprintf("sub(%d) START (sleep: %d)", no, sleep))
+	// time.Sleep(time.Second * sleep)
+	// printLog(fmt.Sprintf("sub(%d) END", no))
+
+	count := 0
+	fmt.Println("@start sub", start, end)
+	for i := start; i <= end; i++ {
+		t := timetables[i]
+		datetime, _ := time.Parse(time.RFC3339, t.Date)
+		t.Date = datetime.Format("2006/01/02")
+		strSlices := []string{t.Date, t.TrainClass, t.TrainName, t.Station}
+		strConcat := strings.Join(strSlices, "")
+		TimetableCacheMap.Store(strConcat, t)
+		//fmt.Sprintf("store cache %s, %d", strConcat, count)
+		count++
+	}
+	fmt.Println("@end sub", start, end)
+
+	wait.Done()
+}
+
 func main() {
 	// MySQL関連のお膳立て
 	var err error
@@ -2184,6 +2214,43 @@ func main() {
 		log.Fatalf("failed to connect to DB: %s.", err.Error())
 	}
 	defer dbx.Close()
+
+	fmt.Println("@start cache")
+	var timetables []TrainTimetable
+	err = dbx.Select(&timetables, "SELECT * FROM train_timetable_master")
+	if err != nil {
+		log.Fatalf("cache error: %s.", err.Error())
+		return
+	}
+
+	timetablesCount := len(timetables)
+	index := 0
+	for {
+		const distinct = 1000
+		end := index + distinct
+		if end >= timetablesCount {
+			end = timetablesCount - 1
+		}
+
+		wait.Add(1)
+		go sub(timetables, index, end)
+
+		index = end + 1
+		if index >= timetablesCount {
+			break
+		}
+	}
+	wait.Wait()
+
+	// for _, t := range timetables {
+	// 	datetime, _ := time.Parse(time.RFC3339, t.Date)
+	// 	t.Date = datetime.Format("2006/01/02")
+	// 	strSlices := []string{t.Date, t.TrainClass, t.TrainName, t.Station}
+	// 	strConcat := strings.Join(strSlices, "")
+	// 	TimetableCacheMap.Store(strConcat, t)
+	// 	fmt.Println("store cache %s", strConcat)
+	// }
+	fmt.Println("@end cache")
 
 	// HTTP
 
