@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -21,7 +23,6 @@ import (
 	goji "goji.io"
 	"goji.io/pat"
 	"golang.org/x/crypto/pbkdf2"
-	// "sync"
 )
 
 var (
@@ -234,6 +235,17 @@ type AuthResponse struct {
 	Email string `json:"email"`
 }
 
+type TrainTimetable struct {
+	Date       string `json:"date" db:"date"`
+	TrainClass string `json:"train_class" db:"train_class"`
+	TrainName  string `json:"train_name" db:"train_name"`
+	Station    string `json:"station" db:"station"`
+	Departure  string `json:"departure" db:"departure"`
+	Arrival    string `json:"arrival" db:"arrival"`
+}
+
+var TimetableCacheMap sync.Map
+
 const (
 	sessionName   = "session_isutrain"
 	availableDays = 10
@@ -242,6 +254,21 @@ const (
 var (
 	store sessions.Store = sessions.NewCookieStore([]byte(secureRandomStr(20)))
 )
+
+func getTimetable(date string, trainClass string, trainName string, station string) (timetable TrainTimetable, err error) {
+
+	strSlices := []string{date, trainClass, trainName, station}
+	strConcat := strings.Join(strSlices, "")
+	if cache, ok := TimetableCacheMap.Load(strConcat); ok {
+		fmt.Println("Hit cache %v", strConcat)
+		timetable = cache.(TrainTimetable)
+		return timetable, nil
+	}
+
+	err = dbx.Get(&timetable, "SELECT * FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?", date, trainClass, trainName, station)
+	TimetableCacheMap.Store(strConcat, timetable)
+	return timetable, err
+}
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Hello, World")
@@ -503,6 +530,7 @@ func trainSearchHandler(w http.ResponseWriter, r *http.Request) {
 	var inQuery string
 	var inArgs []interface{}
 
+	// やや重そう?　train_master
 	if trainClass == "" {
 		query := "SELECT * FROM train_master WHERE date=? AND train_class IN (?) AND is_nobori=?"
 		inQuery, inArgs, err = sqlx.In(query, date.Format("2006/01/02"), usableTrainClassList, isNobori)
@@ -578,14 +606,17 @@ func trainSearchHandler(w http.ResponseWriter, r *http.Request) {
 			// 列車情報
 
 			// 所要時間
-			var departure, arrival string
+			// var departure, arrival string
 
-			err = dbx.Get(&departure, "SELECT departure FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?", date.Format("2006/01/02"), train.TrainClass, train.TrainName, fromStation.Name)
+			// train_timetable_masterは255万件ある
+			//err = dbx.Get(&departure, "SELECT departure FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?", date.Format("2006/01/02"), train.TrainClass, train.TrainName, fromStation.Name)
+			departureTimetable, err := getTimetable(date.Format("2006/01/02"), train.TrainClass, train.TrainName, fromStation.Name)
 			if err != nil {
 				errorResponse(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 
+			departure := departureTimetable.Departure
 			departureDate, err := time.Parse("2006/01/02 15:04:05 -07:00 MST", fmt.Sprintf("%s %s +09:00 JST", date.Format("2006/01/02"), departure))
 			if err != nil {
 				errorResponse(w, http.StatusInternalServerError, err.Error())
@@ -597,11 +628,13 @@ func trainSearchHandler(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			err = dbx.Get(&arrival, "SELECT arrival FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?", date.Format("2006/01/02"), train.TrainClass, train.TrainName, toStation.Name)
+			arrivalTimetable, err := getTimetable(date.Format("2006/01/02"), train.TrainClass, train.TrainName, toStation.Name)
+			//err = dbx.Get(&arrival, "SELECT arrival FROM train_timetable_master WHERE date=? AND train_class=? AND train_name=? AND station=?", date.Format("2006/01/02"), train.TrainClass, train.TrainName, toStation.Name)
 			if err != nil {
 				errorResponse(w, http.StatusInternalServerError, err.Error())
 				return
 			}
+			arrival := arrivalTimetable.Arrival
 
 			premium_avail_seats, err := train.getAvailableSeats(fromStation, toStation, "premium", false)
 			if err != nil {
